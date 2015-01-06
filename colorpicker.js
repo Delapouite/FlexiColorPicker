@@ -4,7 +4,7 @@
  */
 (function(window, document, undefined) {
 
-    var picker, slide, hueOffset = 15, svgNS = 'http://www.w3.org/2000/svg';
+    var picker, slide, svgNS = 'http://www.w3.org/2000/svg';
 
     // This HTML snippet is inserted into the innerHTML property of the passed color picker element
     // when the no-hassle call to ColorPicker() is used, i.e. ColorPicker(function(hex, hsv, rgb) { ... });
@@ -20,17 +20,19 @@
         '</div>'
     ].join('');
 
+    function restrictToBounds(value, minimum, maximum) {
+        return Math.max(Math.min(value, maximum), minimum)
+    }
+
     /**
      * Return mouse position relative to the element el.
      */
-    function mousePosition(evt) {
-        // Webkit:
-        if (evt.offsetX !== undefined && evt.offsetY !== undefined) {
-            return { x: evt.offsetX, y: evt.offsetY };
-        }
-        // Firefox:
-        var wrapper = evt.target.parentNode.parentNode;
-        return { x: evt.layerX - wrapper.offsetLeft, y: evt.layerY - wrapper.offsetTop };
+    function mousePosition(evt, element) {
+        var rect = element.getBoundingClientRect();
+        return {
+            x: restrictToBounds(evt.clientX - rect.left, 0, element.clientWidth),
+            y: restrictToBounds(evt.clientY - rect.top, 0, element.clientHeight)
+        };
     }
 
     /**
@@ -153,12 +155,12 @@
      */
     function slideListener(ctx, slideElement, pickerElement) {
         return function(evt) {
-            var mouse = mousePosition(evt);
-            ctx.h = mouse.y / slideElement.offsetHeight * 360 + hueOffset;
+            var mouse = mousePosition(evt, slideElement);
+            ctx.h = mouse.y / slideElement.offsetHeight * 360;
             var pickerColor = hsv2rgb({ h: ctx.h, s: 1, v: 1 });
             var c = hsv2rgb({ h: ctx.h, s: ctx.s, v: ctx.v });
             pickerElement.style.backgroundColor = pickerColor.hex;
-            ctx.callback && ctx.callback(c.hex, { h: ctx.h - hueOffset, s: ctx.s, v: ctx.v }, { r: c.r, g: c.g, b: c.b }, undefined, mouse);
+            ctx.callback && ctx.callback(c.hex, { h: ctx.h, s: ctx.s, v: ctx.v }, { r: c.r, g: c.g, b: c.b }, undefined, mouse);
         };
     }
 
@@ -168,14 +170,14 @@
      */
     function pickerListener(ctx, pickerElement) {
         return function(evt) {
-            var mouse = mousePosition(evt),
+            var mouse = mousePosition(evt, pickerElement),
                 width = pickerElement.offsetWidth,
                 height = pickerElement.offsetHeight;
 
             ctx.s = mouse.x / width;
             ctx.v = (height - mouse.y) / height;
             var c = hsv2rgb(ctx);
-            ctx.callback && ctx.callback(c.hex, { h: ctx.h - hueOffset, s: ctx.s, v: ctx.v }, { r: c.r, g: c.g, b: c.b }, mouse);
+            ctx.callback && ctx.callback(c.hex, { h: ctx.h, s: ctx.s, v: ctx.v }, { r: c.r, g: c.g, b: c.b }, mouse);
         };
     }
 
@@ -203,13 +205,17 @@
 
             this.slideElement = element.getElementsByClassName('slide')[0];
             this.pickerElement = element.getElementsByClassName('picker')[0];
-            var slideIndicator = element.getElementsByClassName('slide-indicator')[0];
-            var pickerIndicator = element.getElementsByClassName('picker-indicator')[0];
+            this.slideIndicator = element.getElementsByClassName('slide-indicator')[0];
+            this.pickerIndicator = element.getElementsByClassName('picker-indicator')[0];
 
-            ColorPicker.fixIndicators(slideIndicator, pickerIndicator);
-
+            ColorPicker.positionIndicators(
+                this.slideIndicator,
+                this.pickerIndicator,
+                {x: 0, y: 0},
+                {x: 0, y: 0}
+            );
             this.callback = function(hex, hsv, rgb, pickerCoordinate, slideCoordinate) {
-                ColorPicker.positionIndicators(slideIndicator, pickerIndicator, slideCoordinate, pickerCoordinate);
+                ColorPicker.positionIndicators(this.slideIndicator, this.pickerIndicator, slideCoordinate, pickerCoordinate);
                 pickerElement(hex, hsv, rgb);
             };
 
@@ -217,6 +223,11 @@
             this.callback = callback;
             this.pickerElement = pickerElement;
             this.slideElement = slideElement;
+        }
+        this.slide_listener = slideListener(this, this.slideElement, this.pickerElement);
+        this.picker_listener = pickerListener(this, this.pickerElement);
+        if (!callback) {
+            this.fixIndicators(this.slideIndicator, this.pickerIndicator);
         }
 
         // Generate uniq IDs for linearGradients so that we don't have the same IDs within one document.
@@ -246,30 +257,33 @@
 
         uniqID++;
 
-        this.slideElement.addEventListener('click', slideListener(this, this.slideElement, this.pickerElement), false);
-        this.pickerElement.addEventListener('click', pickerListener(this, this.pickerElement), false);
-
-        enableDragging(this, this.slideElement, slideListener(this, this.slideElement, this.pickerElement));
-        enableDragging(this, this.pickerElement, pickerListener(this, this.pickerElement));
+        enableDragging(this.slideElement, this.slide_listener);
+        enableDragging(this.pickerElement, this.picker_listener);
     }
 
    /**
     * Enable drag&drop color selection.
-    * @param {object} ctx ColorPicker instance.
     * @param {DOMElement} element HSV slide element or HSV picker element.
     * @param {Function} listener Function that will be called whenever mouse is dragged over the element with event object as argument.
     */
-    function enableDragging(ctx, element, listener) {
+    function enableDragging(element, listener) {
         var mousedown = false;
-
-        element.addEventListener('mousedown', function() { mousedown = true; }, false);
-        element.addEventListener('mouseup',   function() { mousedown = false; }, false);
-        element.addEventListener('mouseout',  function() { mousedown = false; }, false);
-        element.addEventListener('mousemove', function(evt) {
-            if (mousedown) {
-                listener(evt);
-            }
-        }, false);
+        function mouseDown(evt) {
+            mousedown = true;
+            evt.preventDefault();
+            // listen to mouse move/up on document only after mouse down on element
+            document.addEventListener('mouseup', mouseUp, true);
+            document.addEventListener('mousemove', mouseMove, false);
+        }
+        function mouseMove(evt) {if (mousedown) listener(evt);}
+        function mouseUp(evt) {
+            mouseMove(evt);
+            mousedown = false;
+            // stop listening to mouse move/up on document after mouse up
+            document.removeEventListener('mouseup', mouseUp, false);
+            document.removeEventListener('mousemove', mouseMove, false);
+        }
+        element.addEventListener('mousedown', mouseDown, false);
     }
 
     ColorPicker.hsv2rgb = function(hsv) {
@@ -368,11 +382,11 @@
     };
 
     /**
-     * Helper to fix indicators - this is recommended (and needed) for dragable color selection (see enabledDragging()).
+     * Helper to enable dragging on indicators.
      */
-    ColorPicker.fixIndicators = function(slideIndicator, pickerIndicator) {
-        pickerIndicator.style.pointerEvents = 'none';
-        slideIndicator.style.pointerEvents = 'none';
+    ColorPicker.prototype.fixIndicators = function(slideIndicator, pickerIndicator) {
+        enableDragging(slideIndicator, this.slide_listener);
+        enableDragging(pickerIndicator, this.picker_listener);
     };
 
     window.ColorPicker = ColorPicker;
